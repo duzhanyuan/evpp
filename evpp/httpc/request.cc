@@ -51,16 +51,12 @@ Request::~Request() {
 }
 
 void Request::Execute(const Handler& h) {
-    if (loop_->IsInLoopThread()) {
-        ExecuteInLoop(h);
-    } else {
-        loop_->RunInLoop(std::bind(&Request::ExecuteInLoop, this, h));
-    }
+    handler_ = h;
+    loop_->RunInLoop(std::bind(&Request::ExecuteInLoop, this));
 }
 
-void Request::ExecuteInLoop(const Handler& h) {
-    handler_ = h;
-
+void Request::ExecuteInLoop() {
+    assert(loop_->IsInLoopThread());
     evhttp_cmd_type req_type = EVHTTP_REQ_GET;
 
     std::string errmsg;
@@ -103,7 +99,7 @@ void Request::ExecuteInLoop(const Handler& h) {
     }
 
     if (evhttp_make_request(conn_->evhttp_conn(), req, req_type, uri_.c_str())) {
-        // here the conn has own the req, so don't free it twice.
+        // At here conn_ has owned this req, so don't need to free it.
         errmsg = "evhttp_make_request fail";
         goto failed;
     }
@@ -120,18 +116,31 @@ void Request::HandleResponse(struct evhttp_request* rsp, void* v) {
     Request* thiz = (Request*)v;
     assert(thiz);
 
-    std::shared_ptr<Response> response;
-    if (rsp) {
-        response.reset(new Response(thiz, rsp));
-        if (thiz->pool_) {
-            thiz->pool_->Put(thiz->conn_);
-        }
-    } else {
-        response.reset(new Response(thiz));
+}
+
+void Request::HandleResponse(struct evhttp_request* r) {
+    assert(loop_->IsInLoopThread());
+
+    if (pool_) {
+        //Recycling the http Connection object
+        pool_->Put(conn_);
     }
 
-    thiz->handler_(response);
+    if (r && r->response_code == HTTP_OK) {
+        std::shared_ptr<Response> response(new Response(this, r));
+        handler_(response);
+        return;
+    }
+
+    // Retry
+    if (retried_ < retry_time_) {
+        LOG_WARN << "this=" << this << " retried=" << retried_ << ". Try again";
+        retried_ += 1;
+        usleep(5 * 1000000);
+        ExecuteInLoop();
+    }
 }
+
 } // httpc
 } // evpp
 
