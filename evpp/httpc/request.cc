@@ -112,10 +112,10 @@ failed:
     handler_(response);
 }
 
-void Request::HandleResponse(struct evhttp_request* rsp, void* v) {
+void Request::HandleResponse(struct evhttp_request* r, void* v) {
     Request* thiz = (Request*)v;
     assert(thiz);
-
+    thiz->HandleResponse(r);
 }
 
 void Request::HandleResponse(struct evhttp_request* r) {
@@ -125,18 +125,21 @@ void Request::HandleResponse(struct evhttp_request* r) {
         //Recycling the http Connection object
         pool_->Put(conn_);
     }
+    conn_.reset();
 
-    if (r && r->response_code == HTTP_OK) {
-        std::shared_ptr<Response> response(new Response(this, r));
-        handler_(response);
-        return;
+    if (r) {
+        if (r->response_code == HTTP_OK || retried_ >= retry_time_) {
+            LOG_WARN << "this=" << this << " response_code=" << r->response_code << " retried=" << retried_ << " max retry_time=" << retry_time_;
+            std::shared_ptr<Response> response(new Response(this, r));
+            handler_(response);
+            return;
+        }
     }
 
     // Retry
     if (retried_ < retry_time_) {
-        LOG_WARN << "this=" << this << " retried=" << retried_ << ". Try again";
+        LOG_WARN << "this=" << this << " response_code=" << (r ? r->response_code : 0) << " retried=" << retried_ << " max retry_time=" << retry_time_ << ". Try again";
         retried_ += 1;
-        usleep(5 * 1000000);
         ExecuteInLoop();
     }
 }
