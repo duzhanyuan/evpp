@@ -40,6 +40,7 @@ private:
     void HandleError();
     void OnConnectTimeout();
     void OnDNSResolved(const std::vector <struct in_addr>& addrs);
+    void CloseSocket();
     std::string StatusToString() const;
 private:
     enum Status { kDisconnected, kDNSResolving, kDNSResolved, kConnecting, kConnected };

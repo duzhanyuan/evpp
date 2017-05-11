@@ -28,15 +28,19 @@ Connector::~Connector() {
         assert(!chan_.get());
         assert(!dns_resolver_.get());
         assert(!timer_.get());
-    } else if (!IsConnected()) {
+    }
+
+    if (IsConnecting()) {
         // A connected tcp-connection's sockfd has been transfered to TCPConn.
         // But the sockfd of unconnected tcp-connections need to be closed by myself.
         DLOG_TRACE << "close(" << chan_->fd() << ")";
+        assert(fd_ >= 0);
         assert(own_fd_);
         assert(chan_->fd() == fd_);
-        EVUTIL_CLOSESOCKET(fd_);
-        fd_ = INVALID_SOCKET;
+        assert(!chan_->attached());
     }
+
+    CloseSocket();
 
     assert(fd_ < 0);
     chan_.reset();
@@ -89,6 +93,7 @@ void Connector::Cancel() {
 
 void Connector::Connect() {
     DLOG_TRACE << remote_addr_ << " status=" << StatusToString();
+    status_ = kConnecting;
     assert(fd_ == INVALID_SOCKET);
     fd_ = sock::CreateNonblockingSocket();
     own_fd_ = true;
@@ -101,8 +106,6 @@ void Connector::Connect() {
             return;
         }
     }
-
-    status_ = kConnecting;
 
     chan_.reset(new FdChannel(loop_, fd_, false, true));
     DLOG_TRACE << "new FdChannel p=" << chan_.get() << " fd=" << chan_->fd();
@@ -167,12 +170,17 @@ void Connector::HandleError() {
         chan_->Close();
     }
 
+    // Avoid DNSResolver callback again when timeout
+    if (dns_resolver_) {
+        dns_resolver_->Cancel();
+        dns_resolver_.reset();
+    }
+
     timer_->Cancel();
     timer_.reset();
 
-    if (EVUTIL_ERR_CONNECT_REFUSED(serrno)) {
-        conn_fn_(-1, "");
-    }
+    // Notify the user layer that the connection is failed.
+    conn_fn_(-1, "");
 
     // Although TCPClient has a Reconnect() method to deal with automatically reconnection problem,
     // TCPClient's Reconnect() will be invoked when a established connection is broken down.
@@ -183,12 +191,7 @@ void Connector::HandleError() {
     if (owner_tcp_client_->auto_reconnect()) {
 
         // We must close(fd) firstly and then we can do the reconnection.
-        if (fd_ > 0) {
-            DLOG_TRACE << "Connector::HandleError close(" << fd_ << ")";
-            assert(own_fd_);
-            EVUTIL_CLOSESOCKET(fd_);
-            fd_ = INVALID_SOCKET;
-        }
+        CloseSocket();
 
         DLOG_TRACE << "loop=" << loop_ << " auto reconnect in " << owner_tcp_client_->reconnect_interval().Seconds() << "s thread=" << std::this_thread::get_id();
         loop_->RunAfter(owner_tcp_client_->reconnect_interval(), std::bind(&Connector::Start, shared_from_this()));
@@ -217,6 +220,16 @@ void Connector::OnDNSResolved(const std::vector <struct in_addr>& addrs) {
     status_ = kDNSResolved;
 
     Connect();
+}
+
+void Connector::CloseSocket() {
+    if (fd_ > 0) {
+        DLOG_TRACE << "Connector::HandleError close(" << fd_ << ")";
+        assert(own_fd_);
+        own_fd_ = false;
+        EVUTIL_CLOSESOCKET(fd_);
+        fd_ = INVALID_SOCKET;
+    }
 }
 
 std::string Connector::StatusToString() const {
