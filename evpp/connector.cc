@@ -179,8 +179,12 @@ void Connector::HandleError() {
     timer_->Cancel();
     timer_.reset();
 
-    // Notify the user layer that the connection is failed.
-    conn_fn_(-1, "");
+    // If the connection is refused or it will not try again,
+    // We need to notify the user layer that the connection established failed.
+    // Otherwise we will try to do reconnection silently.
+    if (EVUTIL_ERR_CONNECT_REFUSED(serrno) || !owner_tcp_client_->auto_reconnect()) {
+        conn_fn_(-1, "");
+    }
 
     // Although TCPClient has a Reconnect() method to deal with automatically reconnection problem,
     // TCPClient's Reconnect() will be invoked when a established connection is broken down.
